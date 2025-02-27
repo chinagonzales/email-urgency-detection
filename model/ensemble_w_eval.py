@@ -229,7 +229,7 @@ def train_and_save_models():
     y_pred_mnb = best_mnb_model.predict(X_test)
     plot_confusion_matrix(y_test, y_pred_mnb, "Enhanced MNB (with hyperparameter tuning)")
 
-    # --- Logistic Regression with Bag of Words --- #
+    # --- Logistic Regression --- #
     preprocessor = ColumnTransformer(
         transformers=[
             ('text', TfidfVectorizer(ngram_range=(1, 2)), 'processed_text')
