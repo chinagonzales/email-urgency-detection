@@ -10,7 +10,7 @@ import scipy.sparse
 from scipy.sparse import csr_matrix, hstack
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import VotingClassifier
-from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
@@ -232,7 +232,7 @@ def train_and_save_models():
     # --- Logistic Regression with Bag of Words --- #
     preprocessor = ColumnTransformer(
         transformers=[
-            ('text', CountVectorizer(ngram_range=(1, 2)), 'processed_text')
+            ('text', TfidfVectorizer(ngram_range=(1, 2)), 'processed_text')
         ]
     )
 
