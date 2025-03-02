@@ -17,48 +17,89 @@ from ensemble import EnhancedMNB
 app = Flask(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+TOKEN_FILE = "token.pickle"
+CREDENTIALS_FILE = "credentials.json"
 
 def getEmails():
     creds = None
-    if os.path.exists('token.pickle'):
-        with open('token.pickle', 'rb') as token:
+
+    # Load existing credentials if available
+    if os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, "rb") as token:
             creds = pickle.load(token)
+
+    # If credentials are invalid, refresh or reauthenticate
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.pickle', 'wb') as token:
+            try:
+                creds.refresh(Request())  
+                print("Token refreshed successfully.")
+            except RefreshError:
+                print("Token refresh failed. Deleting token and re-authenticating.")
+                os.remove(TOKEN_FILE)  
+                creds = None  
+
+        if not creds:
+            try:
+                flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+                creds = flow.run_local_server(port=0)
+                print("New authentication successful.")
+            except Exception as e:
+                print(f"Error during authentication: {e}")
+                return []  
+
+        # Save valid credentials for future use
+        with open(TOKEN_FILE, "wb") as token:
             pickle.dump(creds, token)
-    
-    service = build('gmail', 'v1', credentials=creds)
-    result = service.users().messages().list(userId='me', maxResults=50).execute()
-    messages = result.get('messages', [])
+
+    # Connect to Gmail API
+    try:
+        service = build('gmail', 'v1', credentials=creds)
+        result = service.users().messages().list(userId='me', maxResults=50).execute()
+        messages = result.get('messages', [])
+    except Exception as e:
+        print(f"Error connecting to Gmail API: {e}")
+        return []
 
     email_list = []
     for msg in messages:
-        txt = service.users().messages().get(userId='me', id=msg['id']).execute()
-        payload = txt.get('payload', {})
-        headers = payload.get('headers', [])
-        subject, sender, body = "No Subject", "Unknown Sender", "No Message"
-        for d in headers:
-            if d['name'] == 'Subject':
-                subject = d['value']
-            if d['name'] == 'From':
-                sender = d['value']
-        body_data = "No Content"
-        if 'parts' in payload:
-            try:
-                data = payload['parts'][0]['body']['data']
-                data = data.replace("-", "+").replace("_", "/")
-                decoded_data = base64.b64decode(data).decode("utf-8")
-                soup = BeautifulSoup(decoded_data, "html.parser")
-                body_data = soup.get_text()
-            except Exception as e:
-                body_data = f"Error reading content: {str(e)}"
-        email_list.append({"subject": subject, "from": sender, "body": body_data})
-    
+        try:
+            txt = service.users().messages().get(userId='me', id=msg['id']).execute()
+            payload = txt.get('payload', {})
+            headers = payload.get('headers', [])
+            
+            subject = sender = body_data = "Unknown"
+
+            # Extract subject and sender
+            for d in headers:
+                if d['name'] == 'Subject':
+                    subject = d['value']
+                if d['name'] == 'From':
+                    sender = d['value']
+
+            # Extract email body
+            if 'parts' in payload:
+                for part in payload['parts']:
+                    if part['mimeType'] == 'text/plain': 
+                        data = part['body']['data']
+                        break
+                    elif part['mimeType'] == 'text/html':
+                        data = part['body']['data']
+
+                if data:
+                    data = data.replace("-", "+").replace("_", "/")
+                    decoded_data = base64.b64decode(data).decode("utf-8", errors="ignore")
+                    soup = BeautifulSoup(decoded_data, "html.parser")
+                    body_data = soup.get_text()
+            else:
+                body_data = "No Content"
+
+            email_list.append({"subject": subject, "from": sender, "body": body_data})
+
+        except Exception as e:
+            print(f"Error reading email: {e}")
+            continue  
+
     return email_list
 
 # Load the trained ensemble model
@@ -74,21 +115,38 @@ def create_inference_df(subject, body):
     processed_text = ' '.join([lemmatizer.lemmatize(word.lower()) for word in word_tokenize(text)])
     keyword_feature = sum(1 for word in processed_text.split() if word in keywords)
     sentiment_score = (analyzer.polarity_scores(processed_text)['compound'] + 1) / 2
+
+    print("\n--- Feature Extraction Debug ---")
+    print(f"Subject: {subject}")
+    print(f"Body: {body[:100]}...")  # Print first 100 characters
+    print(f"Processed Text: {processed_text[:100]}...")
+    print(f"Keyword Feature: {keyword_feature}")
+    print(f"Sentiment Score: {sentiment_score}")
+    
     df_infer = pd.DataFrame([[processed_text, keyword_feature, sentiment_score]],
                             columns=['processed_text', 'keyword_feature', 'sentiment'])
     return df_infer
 
+
 def classify_urgency(email_data):
-    """Predict urgency using the ensemble model and map numeric output to labels."""
     df_infer = create_inference_df(email_data["subject"], email_data["body"])
     prediction = ensemble_model.predict(df_infer)[0]
+    
+    print("\n--- Model Prediction Debug ---")
+    print(f"Raw Prediction Output: {prediction}")
+    
     mapping = {
         3: "Non-Urgent",
         2: "Low Urgency",
         1: "Medium Urgency",
         0: "High Urgency"
     }
-    return mapping.get(prediction, "Unknown")
+    urgency_label = mapping.get(prediction, "Unknown")
+    
+    print(f"Mapped Urgency Label: {urgency_label}")
+    
+    return urgency_label
+
 
 def urgency_color(urgency_label):
     """Return a color code based on urgency label."""

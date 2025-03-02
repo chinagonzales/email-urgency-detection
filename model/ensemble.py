@@ -1,4 +1,3 @@
-# ensemble.py
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
@@ -24,7 +23,7 @@ nltk.download('punkt')
 nltk.download('wordnet')
 nltk.download('vader_lexicon')
 
-# --- Enhanced Multinomial Naive Bayes built from scratch --- #
+# Enhanced Multinomial Naive Bayes
 class EnhancedMNB(BaseEstimator, ClassifierMixin):
     def __init__(self, alpha=1.0, k_best=None, ngram_range=(1, 1)):
         self.alpha = alpha             
@@ -38,33 +37,51 @@ class EnhancedMNB(BaseEstimator, ClassifierMixin):
         self._estimator_type = "classifier"
 
     def _combine_features(self, X):
-        """Combine text TF-IDF with numeric features."""
         X_text = X["processed_text"].values
-        # Fit vectorizer if not fitted
         if not hasattr(self.vectorizer, "vocabulary_"):
             self.vectorizer.fit(X_text)  
         X_tfidf = self.vectorizer.transform(X_text)
+
         keyword_feat = csr_matrix(X[['keyword_feature']].values.astype(float))
         sentiment_feat = csr_matrix(X[['sentiment']].values.astype(float))
+
+        # Increase keyword feature importance
+        keyword_feat *= 2  
+
+        # Reweight sentiment score impact
+        sentiment_feat.data = np.where(sentiment_feat.data < 0.5, 0.5, sentiment_feat.data)
+
         return hstack([X_tfidf, keyword_feat, sentiment_feat])
 
     def fit(self, X, y):
-        if isinstance(X, pd.DataFrame):
-            X_combined = self._combine_features(X)
-        else:
-            raise ValueError("X must be a DataFrame for training.")
+        """Train the Enhanced Multinomial Naive Bayes model."""
+        X_text = X["processed_text"].values
+        self.vectorizer.fit(X_text)
+        X_tfidf = self.vectorizer.transform(X_text)
 
-        # Apply feature selection if requested
+        # Extract additional features
+        keyword_feat = csr_matrix(X[['keyword_feature']].values.astype(float))
+        sentiment_feat = csr_matrix(X[['sentiment']].values.astype(float))
+
+        # Give keyword features extra weight
+        keyword_feat *= 2  
+
+        # Combine TF-IDF with additional features
+        X_combined = hstack([X_tfidf, keyword_feat, sentiment_feat])
+
+        # Apply feature selection 
         if self.k_best and self.k_best > 0:
-            self.selector = SelectKBest(chi2, k=min(self.k_best, X_combined.shape[1]))
-            X_selected = self.selector.fit_transform(X_combined, y)
+            self.selector = SelectKBest(chi2, k=min(self.k_best, X_combined.shape[1]))  
+            X_selected = self.selector.fit_transform(X_combined, y)  # Apply to combined features, performs selection w/ tfidf, keyword, sentiment
         else:
             self.selector = None
             X_selected = X_combined
 
+        # Store class priors and feature probabilities
         self.classes_ = np.unique(y)
         num_classes = len(self.classes_)
         num_features = X_selected.shape[1]
+
         self.feature_log_prob = np.zeros((num_classes, num_features))
         self.class_log_prior = np.zeros(num_classes)
 
@@ -78,15 +95,21 @@ class EnhancedMNB(BaseEstimator, ClassifierMixin):
         return self
 
     def transform(self, X):
-        if isinstance(X, pd.DataFrame):
-            X_combined = self._combine_features(X)
-        elif isinstance(X, scipy.sparse.spmatrix):
-            X_combined = X
-        else:
-            raise ValueError("Unexpected input type for transform()")
+        """Transform input using TF-IDF and additional features."""
+        X_text = X["processed_text"].values
+        X_tfidf = self.vectorizer.transform(X_text)
 
+        keyword_feat = csr_matrix(X[['keyword_feature']].values.astype(float))
+        sentiment_feat = csr_matrix(X[['sentiment']].values.astype(float))
+
+        # Ensure keyword features have the same weight as in training
+        keyword_feat *= 2  
+
+        X_combined = hstack([X_tfidf, keyword_feat, sentiment_feat])
+
+        # Apply feature selection to the full combined feature set
         if self.selector is not None:
-            X_selected = self.selector.transform(X_combined)
+            X_selected = self.selector.transform(X_combined) 
         else:
             X_selected = X_combined
 
@@ -116,8 +139,7 @@ class EnhancedMNB(BaseEstimator, ClassifierMixin):
         from sklearn.metrics import accuracy_score
         return accuracy_score(y, self.predict(X))
 
-
-# --- Data Preparation ---
+# Data Preparation
 df = pd.read_csv('all_tickets.csv')
 df.dropna(subset=['body', 'title', 'urgency'], inplace=True)
 df['urgency'] = df['urgency'].astype(int)
@@ -129,10 +151,12 @@ df['processed_text'] = df['text'].apply(
 )
 
 # Keyword-based feature extraction
-keywords = ['urgent', 'critical', 'asap', 'immediate', 'important', 'immediately', 
-            'as soon as possible','please reply', 'need response', 'emergency', 'high priority']
+keywords = ['urgent', 'critical', 'asap', 'immediate', 'important', 'immediately', 'as soon as possible', 
+            'please reply', 'need response', 'emergency', 'high priority', 'time-sensitive', 'priority', 
+            'top priority', 'urgent matter', 'respond quickly', 'time-critical', 'pressing', 'crucial', 
+            'respond promptly', 'without delay']
 def keyword_feature(text):
-    return sum(1 for word in text.split() if word in keywords)
+    return sum(1 for word in text.split() if word in keywords) + text.count('!') 
 df['keyword_feature'] = df['processed_text'].apply(keyword_feature)
 
 # Sentiment Analysis
@@ -148,16 +172,30 @@ y = df['urgency']
 print("Class Distribution Before Resampling:")
 print(y.value_counts())
 
-ros = RandomOverSampler(random_state=42)
-X_resampled, y_resampled = ros.fit_resample(X, y)
-print("Class Distribution After Resampling:")
-print(pd.Series(y_resampled).value_counts())
-X_resampled = pd.DataFrame(X_resampled, columns=X.columns)
+#Train-Test Split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-X_train, X_test, y_train, y_test = train_test_split(X_resampled, y_resampled, test_size=0.2, random_state=42)
+def train_and_save_models(X_train, X_test, y_train, y_test):
 
-def train_and_save_models():
-    # --- EnhancedMNB with Grid Search ---
+    # Resampling
+    ros = RandomOverSampler(random_state=42)
+    X_train_resampled, y_train_resampled = ros.fit_resample(X_train, y_train)
+
+    print("Class Distribution After Resampling:")
+    print(pd.Series(y_train_resampled).value_counts())
+
+    # Ensure X_train and y_train match after resampling
+    X_train = pd.DataFrame(X_train_resampled, columns=X.columns)
+    y_train = y_train_resampled  
+
+    # Apply Feature Weighting Before Training
+    X_train['keyword_feature'] *= 3
+    X_test['keyword_feature'] *= 3
+
+    X_train['sentiment'] = X_train['sentiment'].apply(lambda x: max(x, 0.6))
+    X_test['sentiment'] = X_test['sentiment'].apply(lambda x: max(x, 0.6))
+
+    # EnhancedMNB with Grid Search
     param_grid = {
         'alpha': [0.1, 0.5, 1.0, 2.0],
         'ngram_range': [(1, 1), (1, 2)],
@@ -165,14 +203,14 @@ def train_and_save_models():
     }
     mnb_model = EnhancedMNB()
     grid_search = GridSearchCV(mnb_model, param_grid, cv=5, scoring='accuracy', n_jobs=1, verbose=2)
-    grid_search.fit(X_train, np.array(y_train))
+    grid_search.fit(X_train, np.array(y_train))  
     print("Best parameters found for EnhancedMNB:", grid_search.best_params_)
     best_mnb_model = grid_search.best_estimator_
 
-    # --- Logistic Regression ---
+    # Logistic Regression 
     preprocessor = ColumnTransformer(
         transformers=[
-            ('text', TfidfVectorizer(ngram_range=(1, 2)), 'processed_text'),
+             ('text', TfidfVectorizer(ngram_range=(1, 2)), 'processed_text'),
         ]
     )
     lr_pipeline = Pipeline([
@@ -181,7 +219,7 @@ def train_and_save_models():
     ])
     lr_pipeline.fit(X_train, y_train)
 
-    # --- Ensemble ---
+    # Ensemble
     ensemble = VotingClassifier(estimators=[
         ('enhanced_mnb', best_mnb_model),
         ('lr_pipeline', lr_pipeline)
@@ -197,4 +235,5 @@ def train_and_save_models():
     print("Model saved successfully!")
 
 if __name__ == "__main__":
-    train_and_save_models()
+    train_and_save_models(X_train, X_test, y_train, y_test)
+
