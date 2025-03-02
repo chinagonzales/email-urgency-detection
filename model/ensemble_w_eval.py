@@ -269,7 +269,7 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
     perform_cross_validation(lr_pipeline, X_train, y_train, "Logistic Regression")
 
     # Evaluate Logistic Regression
-    lr_results = evaluate_model(lr_pipeline, X_test, y_test, "Enhanced MNB (with hyperparameter tuning)")
+    lr_results = evaluate_model(lr_pipeline, X_test, y_test, "Logistic Regression")
 
     # Plot Confusion Matrix for Logistic Regression
     y_pred_lr = lr_pipeline.predict(X_test)
