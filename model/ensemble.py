@@ -329,13 +329,10 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
     ensemble = VotingClassifier(estimators=[
         ('enhanced_mnb', mnb_pipeline),      
         ('log_reg_scratch', logistic_pipeline)  
-    ], voting='soft',
-       weights=[1.0, 0.5] 
+    ], voting='soft'
     )
 
     print("Training the Ensemble Model...")
-    print(f"X_train shape: {X_train.shape}, y_train shape: {y_train.shape}")
-    print(f"y_train unique values: {np.unique(y_train)}")
 
     ensemble.fit(X_train, y_train)  
 

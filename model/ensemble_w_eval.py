@@ -346,8 +346,7 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
     ensemble = VotingClassifier(estimators=[
         ('enhanced_mnb', mnb_pipeline),      
         ('log_reg_scratch', logistic_pipeline)  
-    ], voting='soft',
-       weights=[1.0, 0.5] 
+    ], voting='soft'
     )
 
     ensemble.fit(X_train, y_train)  
