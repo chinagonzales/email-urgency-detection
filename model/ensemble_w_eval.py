@@ -8,12 +8,13 @@ from nltk.stem import WordNetLemmatizer
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import scipy.sparse
 from scipy.sparse import csr_matrix, hstack
-from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import VotingClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
+from scipy.special import softmax
+from sklearn.pipeline import Pipeline
 import time
 import joblib
 import nltk
@@ -38,49 +39,33 @@ class EnhancedMNB(BaseEstimator, ClassifierMixin):
         self.class_log_prior = None
         self.feature_log_prob = None
         self._estimator_type = "classifier"
-
+    
     def _combine_features(self, X):
         X_text = X["processed_text"].values
+        
         if not hasattr(self.vectorizer, "vocabulary_"):
-            self.vectorizer.fit(X_text)  
+            self.vectorizer.fit(X_text)
         X_tfidf = self.vectorizer.transform(X_text)
-
+        
         keyword_feat = csr_matrix(X[['keyword_feature']].values.astype(float))
         sentiment_feat = csr_matrix(X[['sentiment']].values.astype(float))
 
-        # Increase keyword feature importance
-        keyword_feat *= 2  
+        combined_features = hstack([X_tfidf, keyword_feat, sentiment_feat])
 
-        # Reweight sentiment score impact
-        sentiment_feat.data = np.where(sentiment_feat.data < 0.5, 0.5, sentiment_feat.data)
-
-        return hstack([X_tfidf, keyword_feat, sentiment_feat])
+        return combined_features
 
     def fit(self, X, y):
-        """Train the Enhanced Multinomial Naive Bayes model."""
-        X_text = X["processed_text"].values
-        self.vectorizer.fit(X_text)
-        X_tfidf = self.vectorizer.transform(X_text)
+        if not isinstance(X, pd.DataFrame):
+            raise ValueError("Expected DataFrame but got array. Ensure input remains a DataFrame.")
+        X_combined = self._combine_features(X)
 
-        # Extract additional features
-        keyword_feat = csr_matrix(X[['keyword_feature']].values.astype(float))
-        sentiment_feat = csr_matrix(X[['sentiment']].values.astype(float))
-
-        # Give keyword features extra weight
-        keyword_feat *= 2  
-
-        # Combine TF-IDF with additional features
-        X_combined = hstack([X_tfidf, keyword_feat, sentiment_feat])
-
-        # Apply feature selection 
         if self.k_best and self.k_best > 0:
             self.selector = SelectKBest(chi2, k=min(self.k_best, X_combined.shape[1]))  
-            X_selected = self.selector.fit_transform(X_combined, y)  # Apply to combined features, performs selection w/ tfidf, keyword, sentiment
+            X_selected = self.selector.fit_transform(X_combined, y)
         else:
             self.selector = None
             X_selected = X_combined
 
-        # Store class priors and feature probabilities
         self.classes_ = np.unique(y)
         num_classes = len(self.classes_)
         num_features = X_selected.shape[1]
@@ -98,28 +83,21 @@ class EnhancedMNB(BaseEstimator, ClassifierMixin):
         return self
 
     def transform(self, X):
-        """Transform input using TF-IDF and additional features."""
-        X_text = X["processed_text"].values
-        X_tfidf = self.vectorizer.transform(X_text)
-
-        keyword_feat = csr_matrix(X[['keyword_feature']].values.astype(float))
-        sentiment_feat = csr_matrix(X[['sentiment']].values.astype(float))
-
-        # Ensure keyword features have the same weight as in training
-        keyword_feat *= 2  
-
-        X_combined = hstack([X_tfidf, keyword_feat, sentiment_feat])
-
-        # Apply feature selection to the full combined feature set
-        if self.selector is not None:
-            X_selected = self.selector.transform(X_combined) 
+        if not isinstance(X, pd.DataFrame):
+            raise ValueError("Expected DataFrame but got array. Ensure input remains a DataFrame.")
+        
+        X_combined = self._combine_features(X)
+        
+        if self.selector:
+            X_selected = self.selector.transform(X_combined)
         else:
             X_selected = X_combined
-
+        
         return X_selected
 
     def predict(self, X):
         X_selected = self.transform(X)
+        
         if X_selected.shape[1] != self.feature_log_prob.shape[1]:
             raise ValueError(
                 f"Mismatch: Model expects {self.feature_log_prob.shape[1]} features, "
@@ -137,10 +115,93 @@ class EnhancedMNB(BaseEstimator, ClassifierMixin):
             )
         log_probs = X_selected @ self.feature_log_prob.T + self.class_log_prior
         return np.exp(log_probs) / np.exp(log_probs).sum(axis=1, keepdims=True)
-        
-    def score(self, X, y):
-        from sklearn.metrics import accuracy_score
-        return accuracy_score(y, self.predict(X))
+    
+class LogisticRegressionScratch(BaseEstimator, ClassifierMixin):
+    def __init__(self, learning_rate=0.01, epochs=1000, tol=1e-4, lambda_reg=0.01):
+        self.learning_rate = learning_rate
+        self.epochs = epochs
+        self.tol = tol
+        self.lambda_reg = lambda_reg
+        self.weights = None
+        self.bias = None
+
+    def _initialize_parameters(self, n_features, n_classes):
+        """Initialize weights and bias for multiclass classification."""
+        self.weights = np.zeros((n_classes, n_features))
+        self.bias = np.zeros(n_classes)
+
+    def _compute_logits(self, X):
+        """Compute linear combination (logits)."""
+        if scipy.sparse.issparse(X):  
+            return X @ self.weights.T + self.bias
+        elif isinstance(X, pd.DataFrame):
+            raise ValueError("LogisticRegressionScratch expects numerical features, not raw text DataFrame.")
+        else:
+            return np.dot(X, self.weights.T) + self.bias
+
+    def _compute_loss(self, X, y, logits):
+        """Compute categorical cross-entropy loss."""
+        print(f"Debug: X shape in loss function: {X.shape}, y shape: {y.shape}")
+        m = X.shape[0]
+        print(f"logits shape: {logits.shape}")
+        probs = softmax(logits, axis=1)
+        print(f"probs shape: {probs.shape}")
+
+        if y.ndim > 1:
+            print(f"y shape: {y.shape}, unique values: {np.unique(y)}")
+            y = np.argmax(y, axis=1)
+
+        print(f"y shape: {y.shape}, y unique values: {np.unique(y)}")
+
+        if probs.shape[0] != len(y):
+            raise ValueError(f"Shape mismatch: probs shape {probs.shape}, y shape {y.shape}")
+
+        correct_log_probs = -np.log(probs[np.arange(m), y])
+        return np.mean(correct_log_probs)
+
+    def _compute_gradients(self, X, y, probs):
+        m = X.shape[0]
+        y_one_hot = np.eye(self.weights.shape[0])[y] 
+        grad_weights = (1/m) * ((probs - y_one_hot).T @ X.toarray()) + self.lambda_reg * self.weights
+        grad_bias = (1/m) * np.sum(probs - y_one_hot, axis=0)
+        return grad_weights, grad_bias
+
+    def fit(self, X, y):
+        """Train the model using gradient descent."""
+        self.classes_ = np.unique(y) 
+        n_samples, n_features = X.shape
+        n_classes = len(self.classes_)
+        self._initialize_parameters(n_features, n_classes)
+
+        prev_loss = float('inf')
+        for epoch in range(self.epochs):
+            logits = self._compute_logits(X)
+            probs = softmax(logits, axis=1)
+            loss = self._compute_loss(X, y, logits)
+            grad_weights, grad_bias = self._compute_gradients(X, y, probs)
+
+            self.weights -= self.learning_rate * grad_weights
+            self.bias -= self.learning_rate * grad_bias
+
+            if epoch % 100 == 0:
+                print(f'Epoch {epoch}, Loss: {loss:.4f}')
+
+            if abs(prev_loss - loss) < self.tol:
+                break
+
+            prev_loss = loss
+
+        return self
+
+    def predict_proba(self, X):
+        """Predict probabilities for each class."""
+        logits = self._compute_logits(X)
+        return softmax(logits, axis=1)
+
+    def predict(self, X):
+        """Predict class labels."""
+        probs = self.predict_proba(X)
+        return np.argmax(probs, axis=1)
 
 # Data Preparation
 df = pd.read_csv('all_tickets.csv')
@@ -201,7 +262,7 @@ def perform_cross_validation(model, X_train, y_train, model_name, cv_folds=5):
     print(f"Cross-Validation Accuracy Scores for {model_name}: {scores}")
     print(f"Mean Accuracy: {scores.mean():.4f} | Standard Deviation: {scores.std():.4f}\n")
 
-# COnfusion Matrix
+# Confusion Matrix
 def plot_confusion_matrix(y_true, y_pred, model_name):
     cm = confusion_matrix(y_true, y_pred)
     plt.figure(figsize=(6, 4))
@@ -212,7 +273,6 @@ def plot_confusion_matrix(y_true, y_pred, model_name):
     plt.show()
 
 def train_and_save_models(X_train, X_test, y_train, y_test):
-
     # Resampling
     ros = RandomOverSampler(random_state=42)
     X_train_resampled, y_train_resampled = ros.fit_resample(X_train, y_train)
@@ -220,23 +280,20 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
     print("Class Distribution After Resampling:")
     print(pd.Series(y_train_resampled).value_counts())
 
-    # Ensure X_train and y_train match after resampling
     X_train = pd.DataFrame(X_train_resampled, columns=X.columns)
     y_train = y_train_resampled  
 
-    # Apply Feature Weighting Before Training
-    X_train['keyword_feature'] *= 3
-    X_test['keyword_feature'] *= 3
+    for col in ['keyword_feature', 'sentiment']:
+        X_train[col] = X_train[col].astype(float)
+        X_test[col] = X_test[col].astype(float)
 
-    X_train['sentiment'] = X_train['sentiment'].apply(lambda x: max(x, 0.6))
-    X_test['sentiment'] = X_test['sentiment'].apply(lambda x: max(x, 0.6))
-
-    # EnhancedMNB with Grid Search
+    # Train Enhanced MNB with full feature processing 
     param_grid = {
         'alpha': [0.1, 0.5, 1.0, 2.0],
         'ngram_range': [(1, 1), (1, 2)],
         'k_best': [100, 500, 1000]
     }
+    
     mnb_model = EnhancedMNB()
     grid_search = GridSearchCV(mnb_model, param_grid, cv=5, scoring='accuracy', n_jobs=1, verbose=2)
     grid_search.fit(X_train, np.array(y_train))  
@@ -253,61 +310,65 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
     y_pred_mnb = best_mnb_model.predict(X_test)
     plot_confusion_matrix(y_test, y_pred_mnb, "Enhanced MNB (with hyperparameter tuning)")
 
-    # Logistic Regression 
-    preprocessor = ColumnTransformer(
-        transformers=[
-             ('text', TfidfVectorizer(ngram_range=(1, 2)), 'processed_text'),
-        ]
-    )
-    lr_pipeline = Pipeline([
-        ('preprocessor', preprocessor),
-        ('log_reg', LogisticRegression(solver='lbfgs', multi_class='multinomial', max_iter=1000))
-    ])
-    lr_pipeline.fit(X_train, y_train)
+    # Logistic Regression
+    tfidf_vectorizer = TfidfVectorizer()
+    X_train_tfidf = tfidf_vectorizer.fit_transform(X_train["processed_text"])
+    X_test_tfidf = tfidf_vectorizer.transform(X_test["processed_text"])
+
+    print("Training Logistic Regression (TF-IDF only)")
+    log_reg_scratch = LogisticRegressionScratch(learning_rate=0.01, epochs=3000, lambda_reg=0.01)
+    log_reg_scratch.fit(X_train_tfidf, y_train)  
 
     # Cross-Validation for Logistic Regression
-    perform_cross_validation(lr_pipeline, X_train, y_train, "Logistic Regression")
+    perform_cross_validation(log_reg_scratch, X_train_tfidf, y_train, "Logistic Regression")
 
     # Evaluate Logistic Regression
-    lr_results = evaluate_model(lr_pipeline, X_test, y_test, "Logistic Regression")
+    lr_results = evaluate_model(log_reg_scratch, X_test_tfidf, y_test, "Logistic Regression")
 
     # Plot Confusion Matrix for Logistic Regression
-    y_pred_lr = lr_pipeline.predict(X_test)
-    plot_confusion_matrix(y_test, y_pred_lr, "Logistic Regression")
+    y_pred_log_reg = log_reg_scratch.predict(X_test_tfidf)
+    plot_confusion_matrix(y_test, y_pred_log_reg, "Logistic Regression")
+
+    # Pipelines for Ensemble Model 
+    mnb_pipeline = Pipeline([
+        ('mnb_feature_processing', best_mnb_model)
+    ])
+
+    logistic_pipeline = Pipeline([
+        ('tfidf', ColumnTransformer(
+            [('tfidf', TfidfVectorizer(), 'processed_text')],
+            remainder='drop'  
+        )),
+        ('logreg', LogisticRegressionScratch(learning_rate=0.01, epochs=1000, lambda_reg=0.0001))
+    ])
 
     # Ensemble
     ensemble = VotingClassifier(estimators=[
-        ('enhanced_mnb', best_mnb_model),
-        ('lr_pipeline', lr_pipeline)
-    ], voting='soft')
+        ('enhanced_mnb', mnb_pipeline),      
+        ('log_reg_scratch', logistic_pipeline)  
+    ], voting='soft',
+       weights=[1.0, 0.5] 
+    )
 
-    print("Performing Cross-Validation on the Ensemble Model...")
-    cv_scores = cross_val_score(ensemble, X_train, y_train, cv=5, scoring='accuracy')
-    print("CV Accuracy Scores:", cv_scores)
-    print("Mean CV Accuracy:", np.mean(cv_scores))
+    ensemble.fit(X_train, y_train)  
 
     # Cross-Validation for Ensemble
     perform_cross_validation(ensemble, X_train, y_train, "Ensemble Model")
 
-    ensemble.fit(X_train, y_train)
-
-    # Evaluate Ensemble
+    # Evaluate Ensemble 
     ensemble_results = evaluate_model(ensemble, X_test, y_test, "Ensemble Model")
 
-     # Plot Confusion Matrix for Ensemble Model
+    # Plot Confusion Matrix for Ensemble Model
     y_pred_ensemble = ensemble.predict(X_test)
     plot_confusion_matrix(y_test, y_pred_ensemble, "Ensemble Model")
 
+    # Save the model
     joblib.dump(ensemble, 'ensemble_model.pkl')
     print("Model saved successfully!")
 
-     # Models Evaluation 
-    mnb_results = evaluate_model(best_mnb_model, X_test, y_test, "Enhanced MNB")
-    lr_results = evaluate_model(lr_pipeline, X_test, y_test, "Logistic Regression")
-    ensemble_results = evaluate_model(ensemble, X_test, y_test, "Ensemble Model")
-
+    # Final Model Evaluations
     results_df = pd.DataFrame({
-        'Model': ['Enhanced MNB', 'Logistic Regression', 'Ensemble'],
+        'Model': ['Enhanced MNB', 'Logistic Regression Scratch', 'Ensemble'],
         'Accuracy': [mnb_results['accuracy'], lr_results['accuracy'], ensemble_results['accuracy']],
         'Precision': [mnb_results['precision'], lr_results['precision'], ensemble_results['precision']],
         'Time Taken': [mnb_results['time_taken'], lr_results['time_taken'], ensemble_results['time_taken']]
@@ -317,4 +378,3 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
 
 if __name__ == "__main__":
     train_and_save_models(X_train, X_test, y_train, y_test)
-

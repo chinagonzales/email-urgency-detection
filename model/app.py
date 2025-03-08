@@ -13,6 +13,7 @@ from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from ensemble import EnhancedMNB
+from ensemble import LogisticRegressionScratch  
 
 app = Flask(__name__)
 
