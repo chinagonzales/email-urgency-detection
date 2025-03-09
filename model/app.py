@@ -108,8 +108,10 @@ ensemble_model = joblib.load("ensemble_model.pkl")
 
 lemmatizer = WordNetLemmatizer()
 analyzer = SentimentIntensityAnalyzer()
-keywords = ['urgent', 'critical', 'asap', 'immediate', 'important', 'immediately', 
-            'as soon as possible', 'please reply', 'need response', 'emergency', 'high priority']
+keywords = ['urgent', 'critical', 'asap', 'immediate', 'important', 'immediately', 'as soon as possible', 
+            'please reply', 'need response', 'emergency', 'high priority', 'time-sensitive', 'priority', 
+            'top priority', 'urgent matter', 'respond quickly', 'time-critical', 'pressing', 'crucial', 
+            'respond promptly', 'without delay']
 
 def create_inference_df(subject, body):
     text = subject + " " + body
