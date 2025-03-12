@@ -117,7 +117,7 @@ class EnhancedMNB(BaseEstimator, ClassifierMixin):
         return np.exp(log_probs) / np.exp(log_probs).sum(axis=1, keepdims=True)
     
 class LogisticRegressionScratch(BaseEstimator, ClassifierMixin):
-    def __init__(self, learning_rate=0.01, epochs=1000, tol=1e-4, lambda_reg=0.01):
+    def __init__(self, learning_rate=0.01, epochs=1000, tol=1e-4, lambda_reg=0.001):
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.tol = tol
@@ -239,21 +239,32 @@ print(y.value_counts())
 #Train-Test Split
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-def evaluate_model(model, X_test, y_test, model_name):
-    start_time = time.time()
+def evaluate_model(model, X_train, y_train, X_test, y_test, model_name):
+    # Measure training time
+    start_train = time.time()
+    model.fit(X_train, y_train)
+    end_train = time.time()
+
+    # Measure prediction time
+    start_pred = time.time()
     y_pred = model.predict(X_test)
-    end_time = time.time()
+    end_pred = time.time()
     
     accuracy = accuracy_score(y_test, y_pred)
     precision = precision_score(y_test, y_pred, average='weighted')
-    time_taken = end_time - start_time
-    
+
     print(f"Evaluation for {model_name}")
     print(f"Accuracy: {accuracy:.4f}")
     print(f"Precision: {precision:.4f}")
-    print(f"Time Taken: {time_taken:.4f} seconds\n")
-    
-    return {"accuracy": accuracy, "precision": precision, "time_taken": time_taken}
+    print(f"Training Time: {end_train - start_train:.4f} seconds")
+    print(f"Prediction Time: {end_pred - start_pred:.4f} seconds\n")
+
+    return {
+        "accuracy": accuracy,
+        "precision": precision,
+        "training_time": end_train - start_train,
+        "prediction_time": end_pred - start_pred
+    }
 
 # Cross-validation 
 def perform_cross_validation(model, X_train, y_train, model_name, cv_folds=5):
@@ -301,14 +312,14 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
     best_mnb_model = grid_search.best_estimator_
 
     # Cross-Validation for EnhancedMNB
-    perform_cross_validation(best_mnb_model, X_train, y_train, "Enhanced MNB (with hyperparameter tuning)")
+    perform_cross_validation(best_mnb_model, X_train, y_train, "Enhanced MNB")
 
     # Evaluate MNB w/ hyperparameter tuning
-    mnb_results = evaluate_model(best_mnb_model, X_test, y_test, "Enhanced MNB (with hyperparameter tuning)")
+    mnb_results = evaluate_model(best_mnb_model, X_train, y_train, X_test, y_test, "Enhanced MNB")
 
     # Plot Confusion Matrix for EnhancedMNB
     y_pred_mnb = best_mnb_model.predict(X_test)
-    plot_confusion_matrix(y_test, y_pred_mnb, "Enhanced MNB (with hyperparameter tuning)")
+    plot_confusion_matrix(y_test, y_pred_mnb, "Enhanced MNB")
 
     # Logistic Regression
     tfidf_vectorizer = TfidfVectorizer()
@@ -316,14 +327,14 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
     X_test_tfidf = tfidf_vectorizer.transform(X_test["processed_text"])
 
     print("Training Logistic Regression (TF-IDF only)")
-    log_reg_scratch = LogisticRegressionScratch(learning_rate=0.01, epochs=3000, lambda_reg=0.01)
+    log_reg_scratch = LogisticRegressionScratch(learning_rate=0.01, epochs=1000, lambda_reg=0.001)
     log_reg_scratch.fit(X_train_tfidf, y_train)  
 
     # Cross-Validation for Logistic Regression
     perform_cross_validation(log_reg_scratch, X_train_tfidf, y_train, "Logistic Regression")
 
     # Evaluate Logistic Regression
-    lr_results = evaluate_model(log_reg_scratch, X_test_tfidf, y_test, "Logistic Regression")
+    lr_results = evaluate_model(log_reg_scratch, X_train_tfidf, y_train, X_test_tfidf, y_test, "Logistic Regression")
 
     # Plot Confusion Matrix for Logistic Regression
     y_pred_log_reg = log_reg_scratch.predict(X_test_tfidf)
@@ -339,7 +350,7 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
             [('tfidf', TfidfVectorizer(), 'processed_text')],
             remainder='drop'  
         )),
-        ('logreg', LogisticRegressionScratch(learning_rate=0.01, epochs=1000, lambda_reg=0.0001))
+        ('logreg', LogisticRegressionScratch(learning_rate=0.01, epochs=1000, lambda_reg=0.001))
     ])
 
     # Ensemble
@@ -355,7 +366,7 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
     perform_cross_validation(ensemble, X_train, y_train, "Ensemble Model")
 
     # Evaluate Ensemble 
-    ensemble_results = evaluate_model(ensemble, X_test, y_test, "Ensemble Model")
+    ensemble_results = evaluate_model(ensemble, X_train, y_train, X_test, y_test, "Ensemble Model")
 
     # Plot Confusion Matrix for Ensemble Model
     y_pred_ensemble = ensemble.predict(X_test)
@@ -367,10 +378,11 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
 
     # Final Model Evaluations
     results_df = pd.DataFrame({
-        'Model': ['Enhanced MNB', 'Logistic Regression Scratch', 'Ensemble'],
-        'Accuracy': [mnb_results['accuracy'], lr_results['accuracy'], ensemble_results['accuracy']],
-        'Precision': [mnb_results['precision'], lr_results['precision'], ensemble_results['precision']],
-        'Time Taken': [mnb_results['time_taken'], lr_results['time_taken'], ensemble_results['time_taken']]
+    'Model': ['Enhanced MNB', 'Logistic Regression Scratch', 'Ensemble'],
+    'Accuracy': [mnb_results['accuracy'], lr_results['accuracy'], ensemble_results['accuracy']],
+    'Precision': [mnb_results['precision'], lr_results['precision'], ensemble_results['precision']],
+    'Training Time': [mnb_results['training_time'], lr_results['training_time'], ensemble_results['training_time']],
+    'Prediction Time': [mnb_results['prediction_time'], lr_results['prediction_time'], ensemble_results['prediction_time']]
     })
 
     print(results_df)

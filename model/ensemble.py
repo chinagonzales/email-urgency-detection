@@ -117,7 +117,7 @@ class EnhancedMNB(BaseEstimator, ClassifierMixin):
         return np.exp(log_probs) / np.exp(log_probs).sum(axis=1, keepdims=True)
     
 class LogisticRegressionScratch(BaseEstimator, ClassifierMixin):
-    def __init__(self, learning_rate=0.01, epochs=1000, tol=1e-4, lambda_reg=0.01):
+    def __init__(self, learning_rate=0.01, epochs=1000, tol=1e-4, lambda_reg=0.001):
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.tol = tol
@@ -135,7 +135,7 @@ class LogisticRegressionScratch(BaseEstimator, ClassifierMixin):
         if scipy.sparse.issparse(X):  
             return X @ self.weights.T + self.bias
         elif isinstance(X, pd.DataFrame):
-            raise ValueError("LogisticRegressionScratch expects numerical features, not raw text DataFrame.")
+            raise ValueError("LogisticRegression expects numerical features, not raw text DataFrame.")
         else:
             return np.dot(X, self.weights.T) + self.bias
 
@@ -292,10 +292,10 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
     best_mnb_model = grid_search.best_estimator_
 
     # Cross-Validation for EnhancedMNB
-    perform_cross_validation(best_mnb_model, X_train, y_train, "Enhanced MNB (with hyperparameter tuning)")
+    perform_cross_validation(best_mnb_model, X_train, y_train, "Enhanced MNB")
 
     # Evaluate MNB w/ hyperparameter tuning
-    mnb_results = evaluate_model(best_mnb_model, X_test, y_test, "Enhanced MNB (with hyperparameter tuning)")
+    mnb_results = evaluate_model(best_mnb_model, X_test, y_test, "Enhanced MNB")
 
     # Logistic Regression
     tfidf_vectorizer = TfidfVectorizer()
@@ -303,7 +303,7 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
     X_test_tfidf = tfidf_vectorizer.transform(X_test["processed_text"])
 
     print("Training Logistic Regression (TF-IDF only)")
-    log_reg_scratch = LogisticRegressionScratch(learning_rate=0.01, epochs=3000, lambda_reg=0.01)
+    log_reg_scratch = LogisticRegressionScratch(learning_rate=0.01, epochs=1000, lambda_reg=0.001)
     log_reg_scratch.fit(X_train_tfidf, y_train)  
 
     # Cross-Validation for Logistic Regression
@@ -322,7 +322,7 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
             [('tfidf', TfidfVectorizer(), 'processed_text')],
             remainder='drop'  
         )),
-        ('logreg', LogisticRegressionScratch(learning_rate=0.01, epochs=1000, lambda_reg=0.0001))
+        ('logreg', LogisticRegressionScratch(learning_rate=0.01, epochs=1000, lambda_reg=0.001))
     ])
 
     # Ensemble
