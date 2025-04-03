@@ -14,7 +14,8 @@ from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from ensemble import EnhancedMNB
-from ensemble import LogisticRegressionScratch  
+from ensemble import LogisticRegressionScratch
+from ensemble import Ensemble  
 
 app = Flask(__name__)
 
