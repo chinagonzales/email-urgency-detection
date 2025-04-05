@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, jsonify, Response
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -13,57 +13,90 @@ import nltk
 from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from ensemble import EnhancedMNB
-from ensemble import LogisticRegressionScratch
-from ensemble import Ensemble  
+from ensemble import EnhancedMNB, LogisticRegressionScratch, Ensemble
+import threading
+import time
+import queue
+import json
 
 app = Flask(__name__)
 
+# Gmail API scope for reading and modifying emails
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
 TOKEN_FILE = "token.pickle"
 CREDENTIALS_FILE = "credentials.json"
 
-def getEmails():
+# Email tracking variables
+last_email_id = None
+email_cache = []
+
+# Queue system for real-time updates
+new_email_queue = queue.Queue()
+waiting_clients = []
+
+def getEmails(check_new_only=False):
+    global last_email_id, email_cache
+    
     creds = None
 
-    # Load existing credentials if available
+    # Load saved credentials if available
     if os.path.exists(TOKEN_FILE):
         with open(TOKEN_FILE, "rb") as token:
             creds = pickle.load(token)
 
-    # If credentials are invalid, refresh or reauthenticate
+    # Handle expired or invalid credentials
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())  
                 print("Token refreshed successfully.")
             except RefreshError:
-                print("Token refresh failed. Deleting token and re-authenticating.")
+                print("Token refresh failed. Starting fresh authentication.")
                 os.remove(TOKEN_FILE)  
                 creds = None  
 
         if not creds:
             try:
                 flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-                creds = flow.run_local_server(port=0)
+                creds = flow.run_local_server(port=8080)
                 print("New authentication successful.")
             except Exception as e:
-                print(f"Error during authentication: {e}")
+                print(f"Authentication error: {e}")
                 return []  
 
         # Save valid credentials for future use
         with open(TOKEN_FILE, "wb") as token:
             pickle.dump(creds, token)
 
-    # Connect to Gmail API
+    # Fetch emails from Gmail API
     try:
         service = build('gmail', 'v1', credentials=creds)
-        result = service.users().messages().list(userId='me', maxResults=50).execute()
+        
+        # Query setup for email fetching
+        query = None
+        if check_new_only and last_email_id:
+            query = None
+            
+        result = service.users().messages().list(userId='me', maxResults=50, q=query).execute()
         messages = result.get('messages', [])
+        
+        # Update reference point for new emails
+        if messages and not check_new_only:
+            last_email_id = messages[0]['id']
+            
     except Exception as e:
-        print(f"Error connecting to Gmail API: {e}")
+        print(f"Gmail API connection error: {e}")
         return []
 
+    # Filter for only new emails when checking updates
+    if check_new_only and last_email_id:
+        known_ids = [email.get('id') for email in email_cache if 'id' in email]
+        messages = [msg for msg in messages if msg['id'] not in known_ids]
+        
+        if not messages:
+            return []
+
+    # Process each email message
     email_list = []
     for msg in messages:
         try:
@@ -73,39 +106,53 @@ def getEmails():
             
             subject = sender = body_data = "Unknown"
 
-            # Extract subject and sender
+            # Extract email metadata
             for d in headers:
                 if d['name'] == 'Subject':
                     subject = d['value']
                 if d['name'] == 'From':
                     sender = d['value']
 
-            # Extract email body
+            # Extract email content
+            data = None
             if 'parts' in payload:
                 for part in payload['parts']:
                     if part['mimeType'] == 'text/plain': 
-                        data = part['body']['data']
+                        data = part['body'].get('data')
                         break
                     elif part['mimeType'] == 'text/html':
-                        data = part['body']['data']
+                        data = part['body'].get('data')
+            elif 'body' in payload and 'data' in payload['body']:
+                data = payload['body']['data']
 
-                if data:
-                    data = data.replace("-", "+").replace("_", "/")
-                    decoded_data = base64.b64decode(data).decode("utf-8", errors="ignore")
-                    soup = BeautifulSoup(decoded_data, "html.parser")
-                    body_data = soup.get_text()
+            if data:
+                data = data.replace("-", "+").replace("_", "/")
+                decoded_data = base64.b64decode(data).decode("utf-8", errors="ignore")
+                soup = BeautifulSoup(decoded_data, "html.parser")
+                body_data = soup.get_text()
             else:
                 body_data = "No Content"
 
-            email_list.append({"subject": subject, "from": sender, "body": body_data})
+            email_item = {
+                "id": msg['id'],
+                "subject": subject, 
+                "from": sender, 
+                "body": body_data
+            }
+            
+            email_list.append(email_item)
 
         except Exception as e:
-            print(f"Error reading email: {e}")
+            print(f"Email processing error: {e}")
             continue  
 
+    # Update cache for full fetches
+    if not check_new_only:
+        email_cache = email_list
+    
     return email_list
 
-# Load the trained ensemble model
+# Load pre-trained urgency classification model
 ensemble_model = joblib.load("ensemble_model.pkl")
 
 lemmatizer = WordNetLemmatizer()
@@ -116,6 +163,7 @@ keywords = ['urgent', 'critical', 'asap', 'immediate', 'important', 'immediately
             'respond promptly', 'without delay']
 
 def create_inference_df(subject, body):
+    # Feature extraction for urgency prediction
     text = subject + " " + body
     processed_text = ' '.join([lemmatizer.lemmatize(word.lower()) for word in word_tokenize(text)])
     keyword_feature = sum(1 for word in processed_text.split() if word in keywords)
@@ -123,7 +171,7 @@ def create_inference_df(subject, body):
 
     print("\n--- Feature Extraction Debug ---")
     print(f"Subject: {subject}")
-    print(f"Body: {body[:100]}...")  # Print first 100 characters
+    print(f"Body: {body[:100]}...")
     print(f"Processed Text: {processed_text[:100]}...")
     print(f"Keyword Feature: {keyword_feature}")
     print(f"Sentiment Score: {sentiment_score}")
@@ -134,11 +182,10 @@ def create_inference_df(subject, body):
 
 
 def classify_urgency(email_data):
-    """Predict urgency using the ensemble model and map numeric output to grouped labels."""
+    # Predict and group urgency levels
     df_infer = create_inference_df(email_data["subject"], email_data["body"])
     prediction = ensemble_model.predict(df_infer)[0]
     
-    # group urgency levels
     if prediction in [3, 2]:
         return "Non-Urgent"
     elif prediction in [1, 0]:
@@ -148,7 +195,7 @@ def classify_urgency(email_data):
 
 
 def urgency_color(urgency_label):
-    """Return a color code based on the grouped urgency label."""
+    # Map urgency labels to UI colors
     color_map = {
         "Urgent": "red",
         "Non-Urgent": "blue",
@@ -157,15 +204,70 @@ def urgency_color(urgency_label):
     return color_map.get(urgency_label, "black")
 
 
-@app.route('/')
-def index():
-    emails = getEmails()
+def process_emails(emails):
+    # Add urgency classification to emails
     for email_item in emails:
         label = classify_urgency(email_item)
         email_item["urgency_label"] = label
         email_item["urgency_color"] = urgency_color(label)
+    return emails
 
-# HTML PART/ UI
+
+def email_checker_thread():
+    # Background thread for monitoring new emails
+    while True:
+        try:
+            new_emails = getEmails(check_new_only=True)
+            if new_emails:
+                processed_emails = process_emails(new_emails)
+                email_cache.extend(processed_emails)
+                
+                for email in processed_emails:
+                    new_email_queue.put(email)
+                
+                global waiting_clients
+                for client in waiting_clients[:]:
+                    try:
+                        client.put(processed_emails)
+                    except:
+                        pass
+                
+                waiting_clients = []
+            
+            time.sleep(2)
+        except Exception as e:
+            print(f"Email checker thread error: {e}")
+            time.sleep(5)
+
+
+@app.route('/stream-emails')
+def stream_emails():
+    # Server-sent events endpoint for real-time updates
+    def generate():
+        client_queue = queue.Queue()
+        waiting_clients.append(client_queue)
+        
+        yield "data: {}\n\n"
+        
+        while True:
+            try:
+                emails = client_queue.get(timeout=30)
+                yield f"data: {json.dumps({'emails': emails})}\n\n"
+                if client_queue in waiting_clients:
+                    waiting_clients.remove(client_queue)
+                break
+            except queue.Empty:
+                yield "data: {}\n\n"
+    
+    return Response(generate(), mimetype="text/event-stream")
+
+
+@app.route('/')
+def index():
+    # Main application route
+    emails = getEmails()
+    processed_emails = process_emails(emails)
+
     html_template = """
     <!DOCTYPE html>
     <html lang="en">
@@ -175,6 +277,114 @@ def index():
         <title>Email Urgency Classifier</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <script>
+            // Email UI management variables
+            let emailContainer;
+            const displayedEmailIds = new Set();
+            let eventSource;
+            
+            // Initialize event streaming when page loads
+            document.addEventListener('DOMContentLoaded', function() {
+                emailContainer = document.getElementById('email-container');
+                
+                document.querySelectorAll('.email-card').forEach(card => {
+                    if (card.dataset.emailId) {
+                        displayedEmailIds.add(card.dataset.emailId);
+                    }
+                });
+                
+                connectEventSource();
+            });
+            
+            // Connect to server events stream
+            function connectEventSource() {
+                if (eventSource) {
+                    eventSource.close();
+                }
+                
+                eventSource = new EventSource('/stream-emails');
+                
+                eventSource.onmessage = function(event) {
+                    if (event.data && event.data.trim() !== '{}') {
+                        try {
+                            const data = JSON.parse(event.data);
+                            if (data.emails && data.emails.length > 0) {
+                                addNewEmailsToUI(data.emails);
+                                showNotification(data.emails.length);
+                                connectEventSource();
+                            }
+                        } catch (e) {
+                            console.error('Error parsing event data:', e);
+                        }
+                    }
+                };
+                
+                eventSource.onerror = function() {
+                    console.log('EventSource connection error, reconnecting...');
+                    eventSource.close();
+                    setTimeout(connectEventSource, 3000);
+                };
+            }
+            
+            // Add new emails to the interface
+            function addNewEmailsToUI(emails) {
+                emails.forEach(email => {
+                    if (displayedEmailIds.has(email.id)) {
+                        return;
+                    }
+                    
+                    displayedEmailIds.add(email.id);
+                    
+                    const emailCard = document.createElement('div');
+                    emailCard.className = 'email-card border border-gray-200 p-4 mb-2 rounded-xl shadow-md bg-white cursor-pointer hover:shadow-lg hover:bg-gray-100 transition duration-300';
+                    emailCard.dataset.urgency = email.urgency_label;
+                    emailCard.dataset.emailId = email.id;
+                    emailCard.style.setProperty('--urgency-border', email.urgency_color);
+                    emailCard.onclick = function() {
+                        openModal(email.subject, email.from, email.body);
+                    };
+                    
+                    emailCard.innerHTML = `
+                        <div class="flex flex-col space-y-1 w-full">
+                            <div class="font-semibold text-lg text-gray-900 truncate">${email.subject}</div>
+                            <div class="text-gray-500 text-sm">From: ${email.from}</div>
+                            <div class="text-gray-600 text-sm mt-1 line-clamp-2">
+                                ${email.body.split(' ').slice(0, 80).join(' ')}${email.body.split(' ').length > 80 ? '...' : ''}
+                            </div>
+                        </div>
+                        <span class="px-3 py-1 text-xs font-semibold rounded-full shadow-sm"
+                            style="background-color: ${email.urgency_color}; color: white;">
+                            ${email.urgency_label}
+                        </span>
+                    `;
+                    
+                    emailCard.style.opacity = '0';
+                    emailCard.style.transform = 'translateY(-20px)';
+                    emailContainer.insertBefore(emailCard, emailContainer.firstChild);
+                    
+                    setTimeout(() => {
+                        emailCard.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
+                        emailCard.style.opacity = '1';
+                        emailCard.style.transform = 'translateY(0)';
+                    }, 10);
+                });
+            }
+            
+            // Display notification for new emails
+            function showNotification(count) {
+                const notification = document.createElement('div');
+                notification.className = 'fixed top-4 right-4 bg-blue-500 text-white px-4 py-2 rounded-lg shadow-lg';
+                notification.textContent = `${count} new email${count === 1 ? '' : 's'} received`;
+                
+                document.body.appendChild(notification);
+                
+                setTimeout(() => {
+                    notification.style.opacity = '0';
+                    notification.style.transition = 'opacity 0.5s ease';
+                    setTimeout(() => notification.remove(), 500);
+                }, 3000);
+            }
+
+            // Filter emails by urgency
             function filterEmails(urgency) {
                 document.querySelectorAll('.email-card').forEach(card => {
                     if (urgency === 'All' || card.dataset.urgency === urgency) {
@@ -185,6 +395,7 @@ def index():
                 });
             }
 
+            // Open email detail modal
             function openModal(subject, sender, body) {
                 document.getElementById("modal-subject").textContent = subject;
                 document.getElementById("modal-sender").textContent = sender;
@@ -192,10 +403,12 @@ def index():
                 document.getElementById("email-modal").classList.remove("hidden");
             }
 
+            // Close email detail modal
             function closeModal() {
                 document.getElementById("email-modal").classList.add("hidden");
             }
 
+            // Send reply to email
             function sendReply() {
                 const replyText = document.getElementById("reply-text").value;
                 if (replyText.trim() === "") {
@@ -204,6 +417,7 @@ def index():
                 }
                 alert("Reply Sent: " + replyText);
                 document.getElementById("reply-text").value = "";
+                closeModal();
             }
         </script>
     </head>
@@ -216,45 +430,53 @@ def index():
                 </h1>
                 <p class="text-gray-500 text-sm">Manage and respond to customer inquiries</p>
             </div>
-            <div class="mb-4">
-                <label class="font-medium">Filter by Urgency:</label>
-                <select class="border p-2 rounded" onchange="filterEmails(this.value)">
-                    <option value="All">All</option>
-                    <option value="Urgent">Urgent</option>
-                    <option value="Non-Urgent">Non-Urgent</option>
-                </select>
-            </div>        
-            {% for email in emails %}
-                <div class="email-card border border-gray-200 p-4 mb-2 rounded-xl shadow-md bg-white cursor-pointer 
-                    hover:shadow-lg hover:bg-gray-100 transition duration-300"
-                    data-urgency="{{ email.urgency_label }}"
-                    data-urgency-color="{{ email.urgency_color }}"
-                    onclick="openModal('{{ email.subject }}', '{{ email.from }}', `{{ email.body | escape }}`)"
-                    style="--urgency-border: {{ email.urgency_color }};">
-
-                    <div class="flex flex-col space-y-1 w-full">
-                        <!-- subject -->
-                        <div class="font-semibold text-lg text-gray-900 truncate">{{ email.subject }}</div>
-
-                        <!-- sender -->
-                        <div class="text-gray-500 text-sm">From: {{ email.from }}</div>
-
-                        <!-- preview of the email -->
-                        <div class="text-gray-600 text-sm mt-1 line-clamp-2">
-                            {{ " ".join(email.body.split()[:80]) }}{% if email.body.split()|length > 80 %}...{% endif %}
-                        </div>
-                    </div>
-
-                    <!-- urgency label -->
-                    <span class="px-3 py-1 text-xs font-semibold rounded-full shadow-sm"
-                        style="background-color: {{ email.urgency_color }}; color: white;">
-                        {{ email.urgency_label }}
-                    </span>
+            <div class="mb-4 flex justify-between items-center">
+                <div>
+                    <label class="font-medium">Filter by Urgency:</label>
+                    <select class="border p-2 rounded" onchange="filterEmails(this.value)">
+                        <option value="All">All</option>
+                        <option value="Urgent">Urgent</option>
+                        <option value="Non-Urgent">Non-Urgent</option>
+                    </select>
                 </div>
-            {% endfor %}
+                <div class="text-sm text-gray-500">
+                    <span>Real-time email updates</span>
+                </div>
+            </div>        
+            <div id="email-container">
+                {% for email in emails %}
+                    <div class="email-card border border-gray-200 p-4 mb-2 rounded-xl shadow-md bg-white cursor-pointer 
+                        hover:shadow-lg hover:bg-gray-100 transition duration-300"
+                        data-urgency="{{ email.urgency_label }}"
+                        data-email-id="{{ email.id }}"
+                        data-urgency-color="{{ email.urgency_color }}"
+                        onclick="openModal('{{ email.subject }}', '{{ email.from }}', `{{ email.body | escape }}`)"
+                        style="--urgency-border: {{ email.urgency_color }};">
+
+                        <div class="flex flex-col space-y-1 w-full">
+                            <!-- subject -->
+                            <div class="font-semibold text-lg text-gray-900 truncate">{{ email.subject }}</div>
+
+                            <!-- sender -->
+                            <div class="text-gray-500 text-sm">From: {{ email.from }}</div>
+
+                            <!-- preview of the email -->
+                            <div class="text-gray-600 text-sm mt-1 line-clamp-2">
+                                {{ " ".join(email.body.split()[:80]) }}{% if email.body.split()|length > 80 %}...{% endif %}
+                            </div>
+                        </div>
+
+                        <!-- urgency label -->
+                        <span class="px-3 py-1 text-xs font-semibold rounded-full shadow-sm"
+                            style="background-color: {{ email.urgency_color }}; color: white;">
+                            {{ email.urgency_label }}
+                        </span>
+                    </div>
+                {% endfor %}
+            </div>
         </div>
 
-        <!-- modal/popup -->
+        <!-- Email detail modal -->
         <div id="email-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center">
             <div class="bg-white p-6 rounded-lg shadow-lg max-w-lg w-full relative">
                 <!-- close button -->
@@ -269,64 +491,55 @@ def index():
                 <p id="modal-sender" class="text-gray-600 text-sm mb-4"></p>
                 <p id="modal-body" class="text-gray-700"></p>
 
-                <!-- Reply Box -->
+                <!-- Reply composition area -->
                 <div class="border rounded-lg mt-4 shadow-sm">
                     <textarea id="reply-text" class="w-full p-3 border-none focus:outline-none resize-none" placeholder="Type your reply..." rows="4"></textarea>
 
-                    <!-- toolbar -->
-                    <!-- google icons -->
+                    <!-- Formatting toolbar -->
                     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" />
 
                     <div class="flex items-center justify-between p-2 border-t bg-gray-100">
                         <div class="flex space-x-3 text-gray-600">
-                            <!-- Formatting Options -->
+                            <!-- Formatting options -->
                             <button class="hover:text-blue-500 focus:outline-none" aria-label="Formatting Options">
                                 <span class="material-symbols-outlined">format_color_text</span>
                             </button>
                             
-                            <!-- Attach Files -->
                             <button class="hover:text-blue-500 focus:outline-none" aria-label="Attach Files">
                                 <span class="material-symbols-outlined">attach_file</span>
                             </button>
                             
-                            <!-- Insert Link -->
                             <button class="hover:text-blue-500 focus:outline-none" aria-label="Insert Link">
                                 <span class="material-symbols-outlined">link</span>
                             </button>
                             
-                            <!-- Insert Emoji -->
                             <button class="hover:text-blue-500 focus:outline-none" aria-label="Insert Emoji">
                                 <span class="material-symbols-outlined">mood</span>
                             </button>
                             
-                            <!-- Insert Files Using Drive -->
                             <button class="hover:text-blue-500 focus:outline-none" aria-label="Insert Files Using Drive">
                                 <span class="material-symbols-outlined">drive_export</span>
                             </button>
                             
-                            <!-- Insert Photo -->
                             <button class="hover:text-blue-500 focus:outline-none" aria-label="Insert Photo">
-                                <span class="material-symbols-outlined">image</span> <!-- Fixed "imagesmode" typo -->
+                                <span class="material-symbols-outlined">image</span>
                             </button>
                             
-                            <!-- Toggle Confidential Mode -->
                             <button class="hover:text-blue-500 focus:outline-none" aria-label="Toggle Confidential Mode">
                                 <span class="material-symbols-outlined">lock_clock</span>
                             </button>
                             
-                            <!-- Insert Signature -->
                             <button class="hover:text-blue-500 focus:outline-none" aria-label="Insert Signature">
                                 <span class="material-symbols-outlined">draw</span>
                             </button>
                             
-                            <!-- More Options -->
                             <button class="hover:text-blue-500 focus:outline-none" aria-label="More Options">
                                 <span class="material-symbols-outlined">more_vert</span>
                             </button>
                         </div>
 
-                        <!-- Send Button -->
-                        <button class="bg-blue-500 text-white px-4 py-2 rounded-lg shadow-md hover:bg-blue-600 focus:outline-none">
+                        <!-- Send button -->
+                        <button onclick="sendReply()" class="bg-blue-500 text-white px-4 py-2 rounded-lg shadow-md hover:bg-blue-600 focus:outline-none">
                             Send
                         </button>
                     </div>
@@ -336,21 +549,40 @@ def index():
         </div>
     </body>
     <style>
-    /* match the border according to the urgency color */
+    /* Custom styling for urgency indicators */
         .email-card {
-            border-color: var(--urgency-border, #e5e7eb); /* Default to gray */
+            border-color: var(--urgency-border, #e5e7eb);
             transition: border-color 0.3s ease-in-out;
         }
 
         .email-card:hover {
             border-color: var(--urgency-border);
         }
-        </style>
+        
+        /* Animation for newly arrived emails */
+        @keyframes fadeInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .new-email {
+            animation: fadeInDown 0.5s ease forwards;
+        }
+    </style>
 
     </html>
-
     """
-    return render_template_string(html_template, emails=emails)
+    return render_template_string(html_template, emails=processed_emails)
 
 if __name__ == '__main__':
+    # Start background email monitoring
+    email_thread = threading.Thread(target=email_checker_thread, daemon=True)
+    email_thread.start()
+    
     app.run(debug=True)
