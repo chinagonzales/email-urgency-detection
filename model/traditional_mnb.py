@@ -12,27 +12,11 @@ from sklearn.model_selection import train_test_split
 import seaborn as sns
 import matplotlib.pyplot as plt
 from imblearn.over_sampling import RandomOverSampler
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # Ensure necessary nltk resources are available
 nltk.download('punkt')
 nltk.download('wordnet')
 nltk.download('omw-1.4')
-
-# Keyword-based feature extraction
-keywords = ['urgent', 'critical', 'asap', 'immediate', 'important', 'immediately', 'as soon as possible', 
-            'please reply', 'need response', 'emergency', 'high priority', 'time-sensitive', 'priority', 
-            'top priority', 'urgent matter', 'respond quickly', 'time-critical', 'pressing', 'crucial', 
-            'respond promptly', 'without delay']
-
-def keyword_feature(text):
-    return sum(1 for word in text.split() if word in keywords) + text.count('!')
-
-# Sentiment Analysis
-analyzer = SentimentIntensityAnalyzer()
-def compute_sentiment(text):
-    vs = analyzer.polarity_scores(text)
-    return (vs['compound'] + 1) / 2
 
 # Load dataset
 def load_dataset(file_path):
@@ -40,8 +24,6 @@ def load_dataset(file_path):
     df = df[['title', 'body', 'urgency']]
     df.dropna(inplace=True)
     df['text'] = df['title'] + " " + df['body']
-    df['keyword_feature'] = df['text'].apply(keyword_feature)
-    df['sentiment'] = df['text'].apply(compute_sentiment)
     return df
 
 # Preprocessing function
@@ -70,7 +52,10 @@ def train_mnb(X_train, y_train):
 
     for cls in class_counts:
         total_words = sum(word_counts[cls].values())
-        word_probs[cls] = {word: np.log((word_counts[cls][word] + 1) / (total_words + len(vocab))) for word in vocab}
+        word_probs[cls] = {
+            word: np.log((word_counts[cls][word] + 1) / (total_words + len(vocab)))
+            for word in vocab
+        }
 
     end_time = time.time()
     training_time = end_time - start_time
@@ -88,8 +73,6 @@ def predict(row, class_priors, word_probs, vocab):
         unseen_prob = np.log(1 / (total_words + len(vocab)))
         for token in tokens:
             scores[cls] += word_probs[cls].get(token, unseen_prob)
-        scores[cls] += np.log(1 + row['keyword_feature'])
-        scores[cls] += np.log(1 + row['sentiment'])
     return max(scores, key=scores.get)
 
 # Evaluate model
@@ -97,11 +80,11 @@ def evaluate_mnb(X_test, y_test, class_priors, word_probs, vocab, training_time,
     start_time = time.time()
     y_pred = [predict(row, class_priors, word_probs, vocab) for _, row in X_test.iterrows()]
     end_time = time.time()
-    
+
     accuracy = accuracy_score(y_test, y_pred)
     precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
     prediction_time = end_time - start_time
-    
+
     print(f"Evaluation for {model_name}")
     print(f"Accuracy: {accuracy:.4f}")
     print(f"Precision: {precision:.4f}")
@@ -115,7 +98,7 @@ def evaluate_mnb(X_test, y_test, class_priors, word_probs, vocab, training_time,
     plt.ylabel('True Labels')
     plt.title('Confusion Matrix')
     plt.show()
-    
+
     return {
         "accuracy": accuracy,
         "precision": precision,
@@ -125,7 +108,7 @@ def evaluate_mnb(X_test, y_test, class_priors, word_probs, vocab, training_time,
 
 # Main execution
 df = load_dataset("all_tickets.csv")
-X = df[['text', 'keyword_feature', 'sentiment']]
+X = df[['text']]
 y = df['urgency']
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
