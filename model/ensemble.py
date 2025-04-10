@@ -254,7 +254,7 @@ df['text'] = df['title'] + ' ' + df['body']
 
 lemmatizer = WordNetLemmatizer()
 df['processed_text'] = df['text'].apply(
-    lambda text: ' '.join([lemmatizer.lemmatize(word.lower()) for word in word_tokenize(text)])
+    lambda text: ' '.join([lemmatizer.lemmatize(word) for word in word_tokenize(text)])
 )
 
 # Keyword-based feature extraction
@@ -263,7 +263,7 @@ keywords = ['urgent', 'critical', 'asap', 'immediate', 'important', 'immediately
             'top priority', 'urgent matter', 'respond quickly', 'time-critical', 'pressing', 'crucial',
             'respond promptly', 'without delay']
 def keyword_feature(text):
-    return sum(1 for word in text.split() if word in keywords) + text.count('!')
+    return sum(1 for word in text.split() if word in keywords)
 df['keyword_feature'] = df['processed_text'].apply(keyword_feature)
 
 # Sentiment Analysis

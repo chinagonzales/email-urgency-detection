@@ -165,7 +165,7 @@ keywords = ['urgent', 'critical', 'asap', 'immediate', 'important', 'immediately
 def create_inference_df(subject, body):
     # Feature extraction for urgency prediction
     text = subject + " " + body
-    processed_text = ' '.join([lemmatizer.lemmatize(word.lower()) for word in word_tokenize(text)])
+    processed_text = ' '.join([lemmatizer.lemmatize(word) for word in word_tokenize(text)])
     keyword_feature = sum(1 for word in processed_text.split() if word in keywords)
     sentiment_score = (analyzer.polarity_scores(processed_text)['compound'] + 1) / 2
 
