@@ -23,7 +23,7 @@ nltk.download('vader_lexicon')
 
 # Enhanced Multinomial Naive Bayes
 class EnhancedMNB(BaseEstimator, ClassifierMixin):
-    def __init__(self, alpha=1.0, k_best=None, ngram_range=(1, 1)):
+    def __init__(self, alpha=1.0, k_best=None, ngram_range=(1, 2)):
         self.alpha = alpha
         self.k_best = k_best
         self.ngram_range = ngram_range
@@ -43,7 +43,6 @@ class EnhancedMNB(BaseEstimator, ClassifierMixin):
 
         keyword_feat = csr_matrix(X[['keyword_feature']].values.astype(float))
         sentiment_feat = csr_matrix(X[['sentiment']].values.astype(float))
-
         combined_features = hstack([X_tfidf, keyword_feat, sentiment_feat])
 
         return combined_features
@@ -168,7 +167,7 @@ class LogisticRegressionScratch(BaseEstimator, ClassifierMixin):
         for epoch in range(self.epochs):
             indices = np.random.permutation(n_samples)
             X_shuffled = X[indices]
-            y_shuffled = y_numpy[indices]  
+            y_shuffled = y_numpy[indices]
 
             if np.max(indices) >= len(y) or np.min(indices) < 0:
                 raise ValueError("Index out of range in dataset splitting")
@@ -198,7 +197,6 @@ class LogisticRegressionScratch(BaseEstimator, ClassifierMixin):
             if no_improve_epochs >= self.patience:
                 print("Early stopping due to lack of improvement.")
                 break
-
             prev_loss = loss
 
         return self
@@ -226,7 +224,6 @@ class Ensemble(BaseEstimator, ClassifierMixin):
 
         X_tfidf = self.vectorizer.fit_transform(X["processed_text"])
         self.lr_model.fit(X_tfidf, y)
-
         self.classes_ = self.mnb_model.classes_
 
         return self
@@ -351,7 +348,7 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
         X_train[col] = X_train[col].astype(float)
         X_test[col] = X_test[col].astype(float)
 
-    # Train Enhanced MNB with full feature processing
+    # Train Enhanced MNB 
     param_grid = {
         'alpha': [0.1, 0.5, 1.0, 2.0],
         'ngram_range': [(1, 1), (1, 2)],
@@ -379,7 +376,7 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
     X_train_tfidf = tfidf_vectorizer.fit_transform(X_train["processed_text"])
     X_test_tfidf = tfidf_vectorizer.transform(X_test["processed_text"])
 
-    print("Training Logistic Regression (TF-IDF only)")
+    print("Training Logistic Regression")
     log_reg_scratch = LogisticRegressionScratch(learning_rate=0.01, epochs=1000, lambda_reg=0.001)
     log_reg_scratch.fit(X_train_tfidf, y_train)
 

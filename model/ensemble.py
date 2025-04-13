@@ -23,7 +23,7 @@ nltk.download('vader_lexicon')
 
 # Enhanced Multinomial Naive Bayes
 class EnhancedMNB(BaseEstimator, ClassifierMixin):
-    def __init__(self, alpha=1.0, k_best=None, ngram_range=(1, 1)):
+    def __init__(self, alpha=1.0, k_best=None, ngram_range=(1, 2)):
         self.alpha = alpha
         self.k_best = k_best
         self.ngram_range = ngram_range
