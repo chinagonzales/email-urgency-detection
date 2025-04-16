@@ -2,8 +2,6 @@ import time
 import numpy as np
 import pandas as pd
 from collections import defaultdict, Counter
-import re
-import string
 import nltk
 from nltk.tokenize import word_tokenize
 from nltk.stem import WordNetLemmatizer
@@ -29,10 +27,8 @@ def load_dataset(file_path):
 # Preprocessing function
 def preprocess_text(text):
     lemmatizer = WordNetLemmatizer()
-    text = text.lower()
-    text = re.sub(f"[{string.punctuation}]", "", text)
     tokens = word_tokenize(text)
-    return [lemmatizer.lemmatize(token) for token in tokens if token.isalnum()]
+    return [lemmatizer.lemmatize(token) for token in tokens]
 
 # Train Multinomial Naive Bayes
 def train_mnb(X_train, y_train):
