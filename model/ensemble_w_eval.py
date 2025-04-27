@@ -352,7 +352,7 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
     param_grid = {
         'alpha': [0.1, 0.5, 1.0, 2.0],
         'ngram_range': [(1, 1), (1, 2)],
-        'k_best': [100, 500, 1000]
+        'k_best': [1000, 5000, 10000]
     }
 
     mnb_model = EnhancedMNB()
