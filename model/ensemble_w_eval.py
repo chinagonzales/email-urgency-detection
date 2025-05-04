@@ -16,6 +16,7 @@ import joblib
 import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, precision_score, confusion_matrix
+
 import nltk
 nltk.download('punkt_tab')
 nltk.download('wordnet')
@@ -23,7 +24,7 @@ nltk.download('vader_lexicon')
 
 # Enhanced Multinomial Naive Bayes
 class EnhancedMNB(BaseEstimator, ClassifierMixin):
-    def __init__(self, alpha=1.0, k_best=None, ngram_range=(1, 2)):
+    def __init__(self, alpha=1.0, k_best=None, ngram_range=(1, 3)):
         self.alpha = alpha
         self.k_best = k_best
         self.ngram_range = ngram_range
@@ -270,6 +271,28 @@ def compute_sentiment(text):
     return (vs['compound'] + 1) / 2
 df['sentiment'] = df['processed_text'].apply(compute_sentiment)
 
+print("\n=== Sample Emails with Tokenized Words and Normalized Sentiment Scores ===\n")
+sampled = df.groupby('urgency').apply(lambda g: g.head(2)).reset_index(drop=True)
+
+for _, row in sampled.iterrows():
+    urgency = row['urgency']
+    original_text = row['text']
+    processed_text = row['processed_text']
+    sentiment = row['sentiment']
+    tokens = word_tokenize(processed_text)
+
+    token_sentiments = {}
+    for word in tokens:
+        score = analyzer.polarity_scores(word)['compound']
+        normalized_score = (score + 1) / 2  # Normalize to [0, 1]
+        token_sentiments[word] = normalized_score
+
+    print(f"Urgency: {urgency}")
+    print(f"Original Text: {original_text[:200]}{'...' if len(original_text) > 200 else ''}")
+    print(f"Processed Tokens: {tokens}")
+    print(f"Per-Token Normalized Sentiment Scores: {token_sentiments}")
+    print(f"Overall Email Sentiment Score: {sentiment:.4f}\n")
+
 X = df[['processed_text', 'keyword_feature', 'sentiment']]
 y = df['urgency']
 
@@ -333,6 +356,49 @@ def plot_confusion_matrix(y_true, y_pred, model_name):
     plt.title(f"Confusion Matrix - {model_name}")
     plt.show()
 
+# Visualization for the N-Gram TF-IDF
+def plot_top_ngrams(model, X_train, y_train, class_label=0, top_n=25):
+    vectorizer = model.vectorizer
+    ngram_ranges = [(1, 1), (2, 2), (3, 3)]
+    ngram_titles = ['Unigram', 'Bigram', 'Trigram']
+
+    for ngram_range, title in zip(ngram_ranges, ngram_titles):
+        # Reinitialize vectorizer with specific ngram range
+        vectorizer = TfidfVectorizer(ngram_range=ngram_range)
+        X_text = X_train["processed_text"].values
+        tfidf_matrix = vectorizer.fit_transform(X_text)
+
+        # Filter by class
+        class_indices = y_train == class_label
+        class_matrix = tfidf_matrix[class_indices]
+
+        # Compute average TF-IDF per feature for the class
+        mean_tfidf = np.asarray(class_matrix.mean(axis=0)).flatten()
+        feature_names = np.array(vectorizer.get_feature_names_out())
+
+        # Get top N features
+        top_indices = np.argsort(mean_tfidf)[::-1][:top_n]
+        top_features = feature_names[top_indices]
+        top_scores = mean_tfidf[top_indices]
+
+        # Compute percentages
+        total_class_tfidf = mean_tfidf.sum()
+        top_percentages = (top_scores / total_class_tfidf) * 100
+
+        # Plot
+        plt.figure(figsize=(10, 6))
+        sns.barplot(x=top_percentages, y=top_features, palette="Reds_r")
+        plt.title(f"Top {top_n} {title}s for Class {class_label} (High Urgency)")
+        plt.xlabel("Percentage of Total Class TF-IDF (%)")
+        plt.ylabel(f"{title}")
+        plt.tight_layout()
+        plt.show()
+
+        # Print table
+        print(f"\nTop {top_n} {title}s with Percentages for Class {class_label} (High Urgency):")
+        for feature, score, pct in zip(top_features, top_scores, top_percentages):
+            print(f"{feature:<30} TF-IDF: {score:.5f} | Contribution: {pct:.2f}%")
+
 def train_and_save_models(X_train, X_test, y_train, y_test):
     # Resampling
     ros = RandomOverSampler(random_state=42)
@@ -351,8 +417,8 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
     # Train Enhanced MNB 
     param_grid = {
         'alpha': [0.1, 0.5, 1.0, 2.0],
-        'ngram_range': [(1, 1), (1, 2)],
-        'k_best': [1000, 5000, 10000]
+        'ngram_range': [(1, 1), (1, 2), (1,3)],
+        'k_best': [5000, 10000, 15000]
     }
 
     mnb_model = EnhancedMNB()
@@ -370,6 +436,9 @@ def train_and_save_models(X_train, X_test, y_train, y_test):
     # Plot Confusion Matrix for EnhancedMNB
     y_pred_mnb = best_mnb_model.predict(X_test)
     plot_confusion_matrix(y_test, y_pred_mnb, "Enhanced MNB")
+
+    # Visualization for N-Gram TF-IDF
+    plot_top_ngrams(best_mnb_model, X_train, y_train, class_label=0, top_n=25)
 
     # Logistic Regression
     tfidf_vectorizer = TfidfVectorizer()
